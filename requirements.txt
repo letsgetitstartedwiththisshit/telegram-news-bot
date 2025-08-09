@@ -1,2 +1,2 @@
-python-telegram-bot>=20,<22
+ppython-telegram-bot[job-queue]>=20,<22
 feedparser
