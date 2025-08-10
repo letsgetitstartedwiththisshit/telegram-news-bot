@@ -153,14 +153,35 @@ def build_validation_message(link: str, title: str, summary: str) -> str:
         lines.append(f"🔗 Джерело: {link}")
         return "\n".join(lines)
     else:
-        # Ukrainian sources: keep original text
+        # Ukrainian sources: keep the original title and summary but ensure the
+        # resulting message does not exceed Telegram's 4096 character limit.
+        # Telegram messages (non-photo) allow up to 4096 characters.  Long
+        # summaries can cause BadRequest: Text is too long.  To avoid this,
+        # truncate the summary to a reasonable length before composing the
+        # message.  We target a summary length of at most 1000 characters,
+        # leaving ample space for the title and link.  If the summary is
+        # longer than 1000 characters, it will be truncated and an ellipsis
+        # appended.
         cap_lines = []
         if title:
             cap_lines.append(f"*{title}*")
+        # Truncate summary for Ukrainian sources to prevent overly long
+        # messages.  Use 1000 characters as a safe upper bound.
         if summary:
-            cap_lines.append(summary)
+            max_summary_len = 1000
+            truncated_summary = summary[:max_summary_len]
+            if len(summary) > max_summary_len:
+                truncated_summary = truncated_summary.rstrip() + "…"
+            cap_lines.append(truncated_summary)
+        # Include a blank line before the source link for readability.
         cap_lines.append(f"\n[Читати джерело]({link})")
-        return "\n".join(cap_lines)
+        message = "\n".join(cap_lines)
+        # If for some reason the assembled message still exceeds 4096
+        # characters (e.g., exceptionally long title), truncate the end.
+        max_text_len = 4096
+        if len(message) > max_text_len:
+            message = message[: max_text_len - 1] + "…"
+        return message
 
 def extract_image(entry):
     """
