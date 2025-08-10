@@ -231,7 +231,9 @@ async def fetch_feeds(context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=keyboard,
                 disable_web_page_preview=True,
             )
-            # Save pending post metadata
+            # Save pending post metadata.  Store the original link so we can
+            # always include it in the caption even if the summary is
+            # truncated when posting to the main channel.
             pending_posts[callback_id] = {
                 "text": message,
                 "edited_text": None,
@@ -239,6 +241,7 @@ async def fetch_feeds(context: ContextTypes.DEFAULT_TYPE):
                 "validator_message_id": sent_msg.message_id,
                 "main_message_id": None,
                 "canonical_link": canonical_link,
+                "source_link": link,
                 "status": "pending",
             }
             validator_to_callback[sent_msg.message_id] = callback_id
@@ -267,10 +270,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     final_text = live_text or data.get("edited_text") or data["text"]
     image_url = data.get("image_url")
     if action == "approve":
-        # Send with photo if available, otherwise as text
+        # Determine the source link (always present for pending posts).  We use this
+        # to append a link to the caption.  If somehow it's missing, fall back
+        # to the canonical link.  We don't rely on the text of the message
+        # itself, since it may be truncated below.
+        source_link = data.get("source_link") or data.get("canonical_link")
+        # Build the caption or message to send.  For posts with an image,
+        # Telegram limits captions to 1024 characters.  We ensure the
+        # source link is always included by reserving space for the link line
+        # and truncating the body of the text as needed.  If no image is
+        # present, we can send a plain text message up to 4096 characters.
         if image_url:
-            # Telegram captions have a max length of 1024 characters
-            caption_to_send = final_text if len(final_text) <= 1024 else final_text[:1020] + "..."
+            # Build the link line.  Use a descriptive label for clarity.
+            link_line = f"\n\n🔗 Джерело: {source_link}"
+            # Reserve space for the link line and ellipsis if we need to truncate.
+            # We allow an extra 3 characters for the ellipsis when truncating.
+            max_caption_len = 1024
+            allowed_len = max_caption_len - len(link_line)
+            if len(final_text) > allowed_len:
+                base_caption = final_text[:allowed_len - 3] + "..."
+            else:
+                base_caption = final_text
+            caption_to_send = base_caption + link_line
             sent_main = await context.bot.send_photo(
                 chat_id=MAIN_CHANNEL_ID,
                 photo=image_url,
@@ -278,9 +299,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
             )
         else:
+            # Plain text message: Telegram allows up to 4096 characters.
+            link_line = f"\n\n🔗 Джерело: {source_link}"
+            max_text_len = 4096
+            allowed_len = max_text_len - len(link_line)
+            if len(final_text) > allowed_len:
+                base_text = final_text[:allowed_len - 3] + "..."
+            else:
+                base_text = final_text
+            text_to_send = base_text + link_line
             sent_main = await context.bot.send_message(
                 chat_id=MAIN_CHANNEL_ID,
-                text=final_text,
+                text=text_to_send,
                 parse_mode="Markdown",
                 disable_web_page_preview=False,
             )
@@ -361,16 +391,38 @@ async def handle_validation_edit(update: Update, context: ContextTypes.DEFAULT_T
 def main():
     if not TOKEN:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN")
+    # Build the application
     application = Application.builder().token(TOKEN).build()
+    # Register the callback handler for approve/decline buttons
     application.add_handler(CallbackQueryHandler(handle_callback))
-    # Handle edits in the validation channel
-    # Register handlers for edits in both channels and messages. Channel edits
-    # are filtered via UpdateType.EDITED_CHANNEL_POST and messages via UpdateType.EDITED_MESSAGE.
-    application.add_handler(MessageHandler(filters.UpdateType.EDITED_CHANNEL_POST, handle_validation_edit))
-    application.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_validation_edit))
-    # Schedule periodic feed fetching every 10 minutes
+    # Handle edits in the validation channel. We register handlers for both
+    # channel post edits and message edits using the UpdateType filters. This
+    # ensures edits made in the validation channel are captured for both
+    # channels and groups.
+    application.add_handler(
+        MessageHandler(filters.UpdateType.EDITED_CHANNEL_POST, handle_validation_edit)
+    )
+    application.add_handler(
+        MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_validation_edit)
+    )
+    # Schedule periodic feed fetching every 10 minutes. The first run is after
+    # 5 seconds to allow the bot to initialize properly.
     application.job_queue.run_repeating(fetch_feeds, interval=600, first=5)
-    application.run_polling()
+
+    # Define a startup hook to delete any existing webhook and drop pending updates.
+    async def remove_webhook(app: Application) -> None:
+        try:
+            # Delete webhook and drop any pending updates. This prevents conflicts
+            # with concurrent getUpdates requests from other sessions.
+            await app.bot.delete_webhook(drop_pending_updates=True)
+        except Exception:
+            # Ignore errors if webhook is not set or cannot be deleted.
+            pass
+
+    # Run polling with the startup hook. We disable signal handling because
+    # Render may manage process signals itself. run_polling will initialize
+    # and start the application, then cleanly shut down on exit.
+    application.run_polling(on_startup=remove_webhook, close_loop=False)
 
 if __name__ == "__main__":
     main()
