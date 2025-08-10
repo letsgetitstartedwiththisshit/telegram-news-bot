@@ -5,8 +5,8 @@ from telegram.ext import (
     Application,
     ContextTypes,
     CallbackQueryHandler,
-    EditedMessageHandler,
-    EditedChannelPostHandler,
+    MessageHandler,
+    filters,
 )
 import asyncio
 import uuid
@@ -310,9 +310,9 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_callback))
     # Handle edits in the validation channel
     # Register handlers for edits in both channels and messages. Channel edits
-    # come via EditedChannelPostHandler, group/message edits via EditedMessageHandler.
-    application.add_handler(EditedChannelPostHandler(handle_validation_edit))
-    application.add_handler(EditedMessageHandler(handle_validation_edit))
+    # are filtered via UpdateType.EDITED_CHANNEL_POST and messages via UpdateType.EDITED_MESSAGE.
+    application.add_handler(MessageHandler(filters.UpdateType.EDITED_CHANNEL_POST, handle_validation_edit))
+    application.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_validation_edit))
     # Schedule periodic feed fetching every 10 minutes
     application.job_queue.run_repeating(fetch_feeds, interval=600, first=5)
     application.run_polling()
