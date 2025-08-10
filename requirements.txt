@@ -2,3 +2,4 @@ python-telegram-bot[job-queue]>=20,<22
 feedparser
 requests
 beautifulsoup4
+deep-translator>=1.11,<2
