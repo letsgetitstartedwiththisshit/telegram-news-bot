@@ -25,16 +25,19 @@ SOURCES = [s.strip() for s in os.getenv("SOURCES", "").split(",") if s.strip()]
 
 # Track canonical links we've already seen to avoid duplicates.
 posted_links = set()
-# pending_posts will map callback IDs to a dict with keys: 
-# 'text', 'edited_text', 'image_url', 'validator_message_id', 'main_message_id',
-# 'canonical_link', and 'status'. These posts are awaiting a decision.
+# pending_posts maps callback IDs to a dict with keys:
+# 'text': the message text sent to the validation channel (translated and formatted),
+# 'image_url': an optional image URL to post with the message,
+# 'validator_message_id': the Telegram message ID of the post in the validation channel,
+# 'canonical_link': the canonicalised URL used for deduplication,
+# 'source_link': the original article link.
 pending_posts = {}
-# posted_posts will store the same structure for items that have been processed
-# (either approved or declined). This allows us to propagate edits after posting.
-posted_posts = {}
-# Map validator message IDs back to callback IDs so we can look up items by the
-# edited message's ID.
-validator_to_callback = {}
+
+# In the simplified version (no edit propagation), we no longer track posted posts
+# separately or map validator message IDs back to callback IDs.  These features
+# were used to support live edit propagation between the validation and main
+# channels.  Since we're reverting to a pre-edit workflow, they are no longer
+# needed.
 
 # Query parameters to drop when canonicalizing URLs
 DROP_PARAMS = {
@@ -234,17 +237,18 @@ async def fetch_feeds(context: ContextTypes.DEFAULT_TYPE):
             # Save pending post metadata.  Store the original link so we can
             # always include it in the caption even if the summary is
             # truncated when posting to the main channel.
+            # Store the post metadata.  We keep only the fields needed to
+            # construct the final post: the original message text, the image
+            # URL (if any), the canonical link for deduplication, and the
+            # original source link.  We no longer track edited_text,
+            # main_message_id or status, since edit propagation is disabled.
             pending_posts[callback_id] = {
                 "text": message,
-                "edited_text": None,
                 "image_url": image_url,
                 "validator_message_id": sent_msg.message_id,
-                "main_message_id": None,
                 "canonical_link": canonical_link,
                 "source_link": link,
-                "status": "pending",
             }
-            validator_to_callback[sent_msg.message_id] = callback_id
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -254,139 +258,62 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ":" not in query.data:
         return
     action, callback_id = query.data.split(":", 1)
-    # Try to fetch from pending posts first, else posted posts (shouldn't happen)
-    data = pending_posts.get(callback_id) or posted_posts.get(callback_id)
+    # Fetch the pending post data.  Since edit propagation is disabled, we
+    # only look up the post in `pending_posts`.  If it's missing, the post
+    # has already been processed.
+    data = pending_posts.get(callback_id)
     if not data:
         await query.edit_message_text("Цей запис вже опрацьовано.")
         return
-    # Determine the final text/caption to use (editor edits take precedence)
-    # Use the live text from the validation message if it exists, then fall back to stored edits
-    live_text = ""
-    if query.message:
-        live_text = (query.message.caption or query.message.text or "").strip()
-    if live_text:
-        # Persist the live edit so subsequent actions stay in sync
-        data["edited_text"] = live_text
-    final_text = live_text or data.get("edited_text") or data["text"]
+    original_text = data["text"]
     image_url = data.get("image_url")
+    # Use the stored source link; fall back to the canonical link if needed.
+    source_link = data.get("source_link") or data.get("canonical_link")
+    # Always append the source link on a new line when posting to the main channel.
+    link_line = f"\n\n🔗 Джерело: {source_link}"
     if action == "approve":
-        # Determine the source link (always present for pending posts).  We use this
-        # to append a link to the caption.  If somehow it's missing, fall back
-        # to the canonical link.  We don't rely on the text of the message
-        # itself, since it may be truncated below.
-        source_link = data.get("source_link") or data.get("canonical_link")
-        # Build the caption or message to send.  For posts with an image,
-        # Telegram limits captions to 1024 characters.  We ensure the
-        # source link is always included by reserving space for the link line
-        # and truncating the body of the text as needed.  If no image is
-        # present, we can send a plain text message up to 4096 characters.
         if image_url:
-            # Build the link line.  Use a descriptive label for clarity.
-            link_line = f"\n\n🔗 Джерело: {source_link}"
-            # Reserve space for the link line and ellipsis if we need to truncate.
-            # We allow an extra 3 characters for the ellipsis when truncating.
-            max_caption_len = 1024
-            allowed_len = max_caption_len - len(link_line)
-            if len(final_text) > allowed_len:
-                base_caption = final_text[:allowed_len - 3] + "..."
+            # For photos, limit captions to 1024 characters including the link.
+            max_len = 1024 - len(link_line)
+            if len(original_text) > max_len:
+                base_caption = original_text[: max_len - 3] + "..."
             else:
-                base_caption = final_text
-            caption_to_send = base_caption + link_line
-            sent_main = await context.bot.send_photo(
+                base_caption = original_text
+            caption = base_caption + link_line
+            await context.bot.send_photo(
                 chat_id=MAIN_CHANNEL_ID,
                 photo=image_url,
-                caption=caption_to_send,
+                caption=caption,
                 parse_mode="Markdown",
             )
+            status = "✅ Опубліковано"
         else:
-            # Plain text message: Telegram allows up to 4096 characters.
-            link_line = f"\n\n🔗 Джерело: {source_link}"
-            max_text_len = 4096
-            allowed_len = max_text_len - len(link_line)
-            if len(final_text) > allowed_len:
-                base_text = final_text[:allowed_len - 3] + "..."
+            # For text messages, limit to 4096 characters including the link.
+            max_len = 4096 - len(link_line)
+            if len(original_text) > max_len:
+                base_text = original_text[: max_len - 3] + "..."
             else:
-                base_text = final_text
+                base_text = original_text
             text_to_send = base_text + link_line
-            sent_main = await context.bot.send_message(
+            await context.bot.send_message(
                 chat_id=MAIN_CHANNEL_ID,
                 text=text_to_send,
                 parse_mode="Markdown",
                 disable_web_page_preview=False,
             )
-        status = "✅ Опубліковано"
-        # Store main message ID for edit propagation
-        data["main_message_id"] = sent_main.message_id
-        data["status"] = "approved"
+            status = "✅ Опубліковано"
     else:
+        # No message sent to main channel on rejection
         status = "❌ Відхилено"
-        data["status"] = "declined"
-    # Edit original message in the validation channel to reflect status and remove buttons.
-    # Use the final text (so edits appear) plus status.
+    # Edit the validation channel message to show the status and remove the buttons.
     await query.edit_message_text(
-        final_text + f"\n\n{status}",
+        original_text + f"\n\n{status}",
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
-    # Move from pending to posted posts for tracking edits
-    if callback_id in pending_posts:
-        pending_posts.pop(callback_id, None)
-        posted_posts[callback_id] = data
+    # Remove the post from pending posts since it's now processed.
+    pending_posts.pop(callback_id, None)
 
-# ---------------------------------------------------------------------------
-# Validation edit handler
-# When a message in the validation channel is edited by an admin, update our
-# stored text and propagate the change to the main channel if already posted.
-async def handle_validation_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Determine the edited message or channel post. In channels, edits arrive as
-    # `edited_channel_post`; in groups they come as `edited_message`.
-    edited_msg = update.edited_channel_post or update.edited_message
-    if not edited_msg:
-        return
-    try:
-        chat_id = edited_msg.chat_id
-    except Exception:
-        return
-    # Only process edits in the validation channel
-    if int(chat_id) != VALIDATION_CHANNEL_ID:
-        return
-    callback_id = validator_to_callback.get(edited_msg.message_id)
-    if not callback_id:
-        return
-    new_text = (edited_msg.caption or edited_msg.text or "").strip()
-    if not new_text:
-        return
-    # Update the appropriate record
-    if callback_id in pending_posts:
-        pending_posts[callback_id]["edited_text"] = new_text
-    if callback_id in posted_posts:
-        data = posted_posts[callback_id]
-        data["edited_text"] = new_text
-        # If the item has been approved, propagate the edit to the main channel
-        if data.get("status") == "approved" and data.get("main_message_id"):
-            try:
-                if data.get("image_url"):
-                    # Edit caption of photo in main channel
-                    caption = new_text if len(new_text) <= 1024 else new_text[:1020] + "..."
-                    await context.bot.edit_message_caption(
-                        chat_id=MAIN_CHANNEL_ID,
-                        message_id=data["main_message_id"],
-                        caption=caption,
-                        parse_mode="Markdown",
-                    )
-                else:
-                    # Edit text message in main channel
-                    text = new_text if len(new_text) <= 4096 else new_text[:4092] + "..."
-                    await context.bot.edit_message_text(
-                        chat_id=MAIN_CHANNEL_ID,
-                        message_id=data["main_message_id"],
-                        text=text,
-                        parse_mode="Markdown",
-                    )
-            except Exception as e:
-                logger = context.logger if hasattr(context, 'logger') else None
-                if logger:
-                    logger.exception("Error propagating edit: %s", e)
 
 def main():
     if not TOKEN:
@@ -395,16 +322,11 @@ def main():
     application = Application.builder().token(TOKEN).build()
     # Register the callback handler for approve/decline buttons
     application.add_handler(CallbackQueryHandler(handle_callback))
-    # Handle edits in the validation channel. We register handlers for both
-    # channel post edits and message edits using the UpdateType filters. This
-    # ensures edits made in the validation channel are captured for both
-    # channels and groups.
-    application.add_handler(
-        MessageHandler(filters.UpdateType.EDITED_CHANNEL_POST, handle_validation_edit)
-    )
-    application.add_handler(
-        MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_validation_edit)
-    )
+    # In the simplified workflow, we do not register handlers for edited
+    # messages or channel posts.  Edits made in the validation channel will
+    # not propagate to the main channel.  If an administrator needs to
+    # correct a post, they should decline the original and resubmit a new
+    # item.
     # Schedule periodic feed fetching every 10 minutes. The first run is after
     # 5 seconds to allow the bot to initialize properly.
     application.job_queue.run_repeating(fetch_feeds, interval=600, first=5)
@@ -419,10 +341,21 @@ def main():
             # Ignore errors if webhook is not set or cannot be deleted.
             pass
 
-    # Run polling with the startup hook. We disable signal handling because
-    # Render may manage process signals itself. run_polling will initialize
-    # and start the application, then cleanly shut down on exit.
-    application.run_polling(on_startup=remove_webhook, close_loop=False)
+    # Delete any existing webhook before starting polling to prevent
+    # conflicts with previous getUpdates sessions. We cannot pass
+    # `on_startup` to run_polling() because this PTB version does not
+    # support that argument. Instead, run the webhook deletion here.
+    import asyncio
+    try:
+        # Ensure any existing webhook is removed; drop pending updates.
+        asyncio.run(application.bot.delete_webhook(drop_pending_updates=True))
+    except Exception:
+        # Ignore errors during webhook deletion; continue starting the bot.
+        pass
+    # Start polling. We disable signal handling because Render may manage
+    # process signals itself. run_polling will initialize and start the
+    # application, then cleanly shut down on exit.
+    application.run_polling(close_loop=False)
 
 if __name__ == "__main__":
     main()
