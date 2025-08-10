@@ -363,7 +363,10 @@ def main():
     # conflicting webhook is unlikely. If webhook conflicts arise in
     # future, consider deleting the webhook via an asynchronous task
     # before calling run_polling() (see PTB docs for examples).
-    application.run_polling(close_loop=False)
+    # Use drop_pending_updates=True to discard any pending updates and
+    # avoid Conflict errors when multiple bot instances exist. This
+    # ensures that only a single getUpdates session is active.
+    application.run_polling(drop_pending_updates=True, close_loop=False)
 
 if __name__ == "__main__":
     main()
