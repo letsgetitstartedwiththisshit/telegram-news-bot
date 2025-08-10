@@ -331,30 +331,17 @@ def main():
     # 5 seconds to allow the bot to initialize properly.
     application.job_queue.run_repeating(fetch_feeds, interval=600, first=5)
 
-    # Define a startup hook to delete any existing webhook and drop pending updates.
-    async def remove_webhook(app: Application) -> None:
-        try:
-            # Delete webhook and drop any pending updates. This prevents conflicts
-            # with concurrent getUpdates requests from other sessions.
-            await app.bot.delete_webhook(drop_pending_updates=True)
-        except Exception:
-            # Ignore errors if webhook is not set or cannot be deleted.
-            pass
-
-    # Delete any existing webhook before starting polling to prevent
-    # conflicts with previous getUpdates sessions. We cannot pass
-    # `on_startup` to run_polling() because this PTB version does not
-    # support that argument. Instead, run the webhook deletion here.
-    import asyncio
-    try:
-        # Ensure any existing webhook is removed; drop pending updates.
-        asyncio.run(application.bot.delete_webhook(drop_pending_updates=True))
-    except Exception:
-        # Ignore errors during webhook deletion; continue starting the bot.
-        pass
     # Start polling. We disable signal handling because Render may manage
     # process signals itself. run_polling will initialize and start the
     # application, then cleanly shut down on exit.
+    #
+    # Note: We previously attempted to delete any existing webhook via
+    # asyncio.run(application.bot.delete_webhook(...)), but that approach
+    # closes the default event loop. In this simplified version we
+    # assume there is only a single instance of the bot running, so a
+    # conflicting webhook is unlikely. If webhook conflicts arise in
+    # future, consider deleting the webhook via an asynchronous task
+    # before calling run_polling() (see PTB docs for examples).
     application.run_polling(close_loop=False)
 
 if __name__ == "__main__":
