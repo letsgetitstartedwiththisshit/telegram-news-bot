@@ -1,7 +1,13 @@
 import os
 import feedparser
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, ContextTypes, CallbackQueryHandler, EditedMessageHandler
+from telegram.ext import (
+    Application,
+    ContextTypes,
+    CallbackQueryHandler,
+    EditedMessageHandler,
+    EditedChannelPostHandler,
+)
 import asyncio
 import uuid
 import requests
@@ -251,17 +257,24 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Цей запис вже опрацьовано.")
         return
     # Determine the final text/caption to use (editor edits take precedence)
-    final_text = data.get("edited_text") or data["text"]
+    # Use the live text from the validation message if it exists, then fall back to stored edits
+    live_text = ""
+    if query.message:
+        live_text = (query.message.caption or query.message.text or "").strip()
+    if live_text:
+        # Persist the live edit so subsequent actions stay in sync
+        data["edited_text"] = live_text
+    final_text = live_text or data.get("edited_text") or data["text"]
     image_url = data.get("image_url")
     if action == "approve":
         # Send with photo if available, otherwise as text
         if image_url:
             # Telegram captions have a max length of 1024 characters
-            caption = final_text if len(final_text) <= 1024 else final_text[:1020] + "..."
+            caption_to_send = final_text if len(final_text) <= 1024 else final_text[:1020] + "..."
             sent_main = await context.bot.send_photo(
                 chat_id=MAIN_CHANNEL_ID,
                 photo=image_url,
-                caption=caption,
+                caption=caption_to_send,
                 parse_mode="Markdown",
             )
         else:
@@ -296,6 +309,9 @@ def main():
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CallbackQueryHandler(handle_callback))
     # Handle edits in the validation channel
+    # Register handlers for edits in both channels and messages. Channel edits
+    # come via EditedChannelPostHandler, group/message edits via EditedMessageHandler.
+    application.add_handler(EditedChannelPostHandler(handle_validation_edit))
     application.add_handler(EditedMessageHandler(handle_validation_edit))
     # Schedule periodic feed fetching every 10 minutes
     application.job_queue.run_repeating(fetch_feeds, interval=600, first=5)
@@ -309,7 +325,9 @@ if __name__ == "__main__":
 # When a message in the validation channel is edited by an admin, update our
 # stored text and propagate the change to the main channel if already posted.
 async def handle_validation_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    edited_msg = update.edited_message
+    # Determine the edited message or channel post. In channels, edits arrive as
+    # `edited_channel_post`; in groups they come as `edited_message`.
+    edited_msg = update.edited_channel_post or update.edited_message
     if not edited_msg:
         return
     try:
