@@ -303,23 +303,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pending_posts.pop(callback_id, None)
         posted_posts[callback_id] = data
 
-def main():
-    if not TOKEN:
-        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN")
-    application = Application.builder().token(TOKEN).build()
-    application.add_handler(CallbackQueryHandler(handle_callback))
-    # Handle edits in the validation channel
-    # Register handlers for edits in both channels and messages. Channel edits
-    # are filtered via UpdateType.EDITED_CHANNEL_POST and messages via UpdateType.EDITED_MESSAGE.
-    application.add_handler(MessageHandler(filters.UpdateType.EDITED_CHANNEL_POST, handle_validation_edit))
-    application.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_validation_edit))
-    # Schedule periodic feed fetching every 10 minutes
-    application.job_queue.run_repeating(fetch_feeds, interval=600, first=5)
-    application.run_polling()
-
-if __name__ == "__main__":
-    main()
-
 # ---------------------------------------------------------------------------
 # Validation edit handler
 # When a message in the validation channel is edited by an admin, update our
@@ -363,12 +346,31 @@ async def handle_validation_edit(update: Update, context: ContextTypes.DEFAULT_T
                     )
                 else:
                     # Edit text message in main channel
+                    text = new_text if len(new_text) <= 4096 else new_text[:4092] + "..."
                     await context.bot.edit_message_text(
                         chat_id=MAIN_CHANNEL_ID,
                         message_id=data["main_message_id"],
-                        text=new_text,
+                        text=text,
                         parse_mode="Markdown",
                     )
-            except Exception:
-                # Ignore edit failures (e.g. message too long or bad markdown)
-                pass
+            except Exception as e:
+                logger = context.logger if hasattr(context, 'logger') else None
+                if logger:
+                    logger.exception("Error propagating edit: %s", e)
+
+def main():
+    if not TOKEN:
+        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN")
+    application = Application.builder().token(TOKEN).build()
+    application.add_handler(CallbackQueryHandler(handle_callback))
+    # Handle edits in the validation channel
+    # Register handlers for edits in both channels and messages. Channel edits
+    # are filtered via UpdateType.EDITED_CHANNEL_POST and messages via UpdateType.EDITED_MESSAGE.
+    application.add_handler(MessageHandler(filters.UpdateType.EDITED_CHANNEL_POST, handle_validation_edit))
+    application.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_validation_edit))
+    # Schedule periodic feed fetching every 10 minutes
+    application.job_queue.run_repeating(fetch_feeds, interval=600, first=5)
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
